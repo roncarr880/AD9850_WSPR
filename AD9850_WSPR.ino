@@ -2,18 +2,22 @@
  *   Chipkit  uc32
  *   AD9850 DDS
  *   QRP Labs Arduio Shield
+ *   QRP Labs Reciever Module
  *   
  *   WSPR transmitter on fixed frequency
  *  
  *  !!! add a real time clock 
+ *  On rx, the dds has jitter starting around 40 mhz, may need to rx 30 meters at 1/3 freq.  20 meters and up will 
+ *      need to be at 1/3 freq and will need bandpass filters on RX.
  */
 
  //  Arduino shield pin assignments for AD9850 module
 
- #define DATA A4     // 18  jumpers to A4 and A5 side
+ #define DATA A4     // 18  jumpers to A4 and A5 side on chipkit uC32
  #define FQUD A5     // 19
  #define WCLK  3
- //#define RESET  2    // reset is hardwired on shield to ground
+ //#define RESET  2    // reset is hardwired to ground on shield 
+ #define TX_INHIBIT 2  // connected to DDS comparitor POT to disable square wave output during RX
 
  // wiring but unused for now
  #define BAND0  7     // relays, drive low to enable
@@ -22,6 +26,7 @@
  #define BAND3 11
  #define BAND4 12
  #define BAND5 A3
+ #define RX_ENABLE_LOW A2
 
  #define GPS1pps  9   // I think there are jumpers on the module to unwire these pins but not mentioned in the documentation
  #define GPSRxD   0
@@ -37,10 +42,14 @@
  
 
 const float DDS_1hz  =  34.359738368;      // dds load word per hz for 125 meg clock
-const float trim_ = 50.0 / 10000000.0;     // freq error as percent of 10 meg
+const float trim_ = 66.0 / 10000000.0;     // freq error as percent of 10 meg, 50?
 
 uint32_t  freq = 10138700;          // SSB base frequency
 uint32_t  wspr_offset = 1500;       // 1400 to 1600 valid value
+// rx has 474 caps so it is a very narrow band sdr
+uint32_t  IF_freq = 4000;           // HDSDR offset away from zero beat noise ( was 4915000 K2 IF freq )
+
+//uint32_t  IF_base;
 
 // seeing some freq jumps, is it float values being non deterministic or 125 mhz osc jumping
 // calc the base freq word one time
@@ -88,16 +97,34 @@ const uint32_t bands[10] = {
    3568600, 7038600, 10138700, 14095600, 18104600, 21094600, 24924600, 28124600, 50293000, 50293000
 };
 const uint8_t bands_active[10] =
-    { 0,      0,        0,        1,        1,       0,         0,        0,       0,       0
+    { 0,      0,        0,        0,        0,       0,         0,        0,       0,       0
 };
 */
 
-// 8 bands with two dummy giving a 20 minute frame
+/*
 const uint32_t bands[10] = {
    18104600,18104600,18104600,18104600,18104600,18104600,18104600,18104600,18104600,18104600
+}; */
+
+// 17 meter filter
+/*
+const uint32_t bands[10] = {
+ 14095600 ,14095600, 14095600,  18104600, 18104600, 18104600,  14095600,14095600, 18104600,  18104600
+};*/
+
+
+// 30 meter filter
+// rx only on 30 meters, tx on 30 and 40.  WSJTX rx only on 30.
+//const uint32_t bands[10] = {
+// 7038600, 10138700, 10138700, 10138700, 10138700, 10138700, 10138700, 10138700, 10138700, 10138700 
+//};
+// rx on 40 meters only
+const uint32_t bands[10] = {
+ 10138700,  7038600,  7038600,  7038600,  7038600,  7038600,  7038600,  7038600,  7038600,  7038600
 };
+
 const uint8_t bands_active[10] = {
-     1,      1,         0,        1,        1,       0,         1,        1,       0,       0
+     1,      0,       1,        0,        0,        0,        1,        0,       0,         0
 };
 
 
@@ -112,6 +139,8 @@ void setup() {
  digitalWrite( FQUD, LOW );
  digitalWrite( WCLK, LOW );
  //digitalWrite( RESET, LOW );
+ pinMode( RX_ENABLE_LOW, OUTPUT );
+ digitalWrite( RX_ENABLE_LOW, HIGH );
 
  pinMode( LED1, OUTPUT );
  pinMode( LED2, OUTPUT );
@@ -121,6 +150,8 @@ void setup() {
 
     base = (float)freq * DDS_1hz;
     base += (float)freq * trim_ * DDS_1hz;
+  //  IF_base = (float)IF_freq * DDS_1hz;
+  //  IF_base += ( float)IF_freq * trim_ * DDS_1hz;
 
    attachCoreTimerService( wspr_core );
 }
@@ -138,6 +169,7 @@ void loop() {
     base += (float)freq * trim_ * DDS_1hz;
     
     if( bands_active[band] ) wspr_tx_enable = 1;
+    else transmit( OFF );         // load the receive frequency
     delay( 1000 * 2 * 60 );       // wait two minutes
     if( ++band == 10 ) band = 0;
 
@@ -228,8 +260,8 @@ int i;
 
 
 /*   WSPR  core timer function */
-// #define WSPRTICK 27307472     // 1 bit time for 1.4648 baud. was a typo here?  seems to work ok
 #define WSPRTICK 27307482     // 1 bit time for 1.4648 baud.  (40M ticks in 1 second) CORE_TICK_RATE is counts in 1ms
+// delay is 1/1.4648 seconds
 // #define WSPRTICK 27306667        // or should it be 1.46484375 baud.  120000/8192
 
 uint32_t  wspr_core( uint32_t timer ){
@@ -266,12 +298,30 @@ static uint32_t wspr_val;
 void transmit( int enable ){
 
    if( enable == OFF ){        // set freq to base
-       load_dds( base, POWER_DOWN);
+       //load_dds( base, POWER_DOWN);   power down results in drift when powered up again
+       pinMode( TX_INHIBIT, OUTPUT );
+       digitalWrite( TX_INHIBIT, LOW );
+       load_dds( calc_rx_freq_val( ), 0 );       // rx at SDR IF freq
        digitalWrite( LED1, LOW );
        digitalWrite( LED2, LOW );
+       digitalWrite( RX_ENABLE_LOW, LOW );
    }
 
    if( enable == ON ){
+       digitalWrite( RX_ENABLE_LOW, HIGH );
        digitalWrite( LED1, HIGH );
+       pinMode( TX_INHIBIT, INPUT );
    }
+}
+
+uint32_t calc_rx_freq_val( ){
+uint32_t val;
+uint32_t rx_freq;
+
+   rx_freq = 4 * (freq - IF_freq);
+   if( rx_freq > 44000000 ) rx_freq = rx_freq / 3;     // use 1/3 clock, will need a bandpass filter for >= 20 meters
+   //  or attenuator on then also /3
+   val = (float)rx_freq * DDS_1hz;
+   val += (float)rx_freq * trim_ * DDS_1hz;
+   return val;
 }
