@@ -79,7 +79,18 @@ DS3231 myRTC( Wire1 );
 // #define GPSRxD   0
 // #define CLK0     5
 // #define CLk2     1   // TX pin, is this correct, not sure a good choice for this I/0 input
- #define RESET   20   // Teensy LC does not have reset, soft reset via pin
+
+  /* switch states */
+#define IDLE_ 0
+#define ARM  1
+#define DARM 2
+#define DONE 3
+#define TAP  4
+#define DTAP 5
+#define LONGP 6
+
+ #define SW   20        // on board switch, wired to reset then to pin 20.  LC does not have a reset function.
+ uint8_t sstate[1];     // button switch state array.  One switch.
 
  #define ON 1
  #define OFF 0
@@ -109,7 +120,7 @@ uint32_t  wspr_offset = 1500;       // 1400 to 1600 valid value
 uint32_t  IF_freq = 4000;           // HDSDR offset away from zero beat noise
                          
 
-uint32_t  base;          
+//uint32_t  base;          
 
 // tones - 1.4648 * value
 
@@ -126,7 +137,7 @@ const uint32_t wspr_msg[] = {
 
 
 // 8 bands, 10 slots giving a 20 minute frame
-#define NUM_BANDS 8
+#define NUM_BANDS 10
 
 struct BANDS {
    uint32_t freq;
@@ -137,6 +148,8 @@ struct BANDS {
 };
 
 struct BANDS  bands[NUM_BANDS] = {
+  {  474200,254, 254, 5 },               // won't tx, pll out of range, maybe rx with pll out of range. Needs R dividers.
+  { 1836600, 90, 254, 4 },               // maybe tx, pll out of range
   { 3568600, 48, 194, 0 },
   {7038600, 26 , 102, 1 },
   {10138700, 18, 72, 1 },
@@ -148,12 +161,12 @@ struct BANDS  bands[NUM_BANDS] = {
 };
 // wspr transmit slots in 20 minute frame.  1 == tx,  0 == rx
 const uint8_t slots[10] =
-    { 0,      1,        0,        0,        1,       0,         0,        0,       0,       0
+    { 0,      0,        0,        0,        1,       0,         0,        1,       0,       1
 };
 
 int group_enabled = 0;    // enable or disable the tx groups feature
 int group = 1;            // bands that share a filter
-int band = 1;             // 1 == 40 meters.   2 == 30 meters
+int band = 4;             // 3 == 40 meters.   4 == 30 meters
 
 int slot;
 int mode = WSPR;  // !!! should maybe start in a mode that doesn't transmit by itsself
@@ -173,6 +186,7 @@ elapsedMillis wspr_tick;
 
 uint8_t transmitting;
 uint8_t tock;
+uint8_t tx_msg;
 
 
 void setup() {
@@ -188,7 +202,7 @@ void setup() {
  digitalWrite( RX_ENABLE_LOW, HIGH );
  pinMode( TX_ENABLE , OUTPUT );
  digitalWrite( TX_ENABLE, LOW );
- pinMode( RESET, INPUT_PULLUP );
+ pinMode( SW, INPUT_PULLUP );
  analogWriteResolution( 12 );
  analogWrite(A12, 0 );            // tx bias
 
@@ -232,10 +246,12 @@ void setup() {
    LCD.clrScr();
 
 
+   display_freq();
+   tock = 1;
+
       // set initial WSPR clock
    frame_time_check();
    wspr_tick = 0;
-   display_freq();
    
 }
 
@@ -286,7 +302,7 @@ int f;
 
    f = freq / 1000;
    LCD.setFont( BigNumbers );
-   LCD.printNumI( f, 0, 3*8, 5, '/' );
+   LCD.printNumI( f, 0, 3*8, 5, '0' );
    LCD.setFont( MediumNumbers);
   // LCD.setFont( SmallFont );
    f = freq % 1000;
@@ -298,24 +314,22 @@ int f;
       LCD.clrRow( 4, 0, 13 );
       LCD.clrRow( 5, 0, 13 );
    }
-   if( mode == DIGI ) LCD.print("DIGI",RIGHT,2*8);
-   else LCD.print("WSPR",RIGHT,2*8);
+   if( mode == DIGI ) LCD.print((char*)"DIGI",RIGHT,2*8);
+   else LCD.print((char*)"WSPR",RIGHT,2*8);
+}
+
+void tx_msg_update(){
+
+   if( transmitting ) LCD.print( (char*) " TX", CENTER, 2 * 8 );
+   else if( group_enabled ) LCD.print((char*) "grp", CENTER, 2 * 8 );
+   else LCD.print( (char*) "   ", CENTER, 2 * 8 );
+  
 }
 
 void loop() {
 uint32_t tone2;
 static uint32_t tm;
 
-// static float wwv_ave;
-  
-  //  freq = bands[band];
-  //  base = (float)freq * DDS_1hz;
-  //  base += (float)freq * trim_ * DDS_1hz;
-    
-  //  if( slots[slot] ) wspr_tx_enable = 1;
-  //  else transmit( OFF );         // load the receive frequency
-  //  delay( 1000 * 2 * 60 );       // wait two minutes
-  //  if( ++slot == 10 ) slot = 0;
 
     radio_control();     // CAT
   
@@ -324,7 +338,7 @@ static uint32_t tm;
        wspr_frame();               // keep time even if not wspr mode
     }
     if( frame_count >= 31 ){
-        frame_time_check();
+        frame_time_check();        // adjust wspr counter to match RTC
         frame_count = 0;
     }
 
@@ -345,26 +359,93 @@ static uint32_t tm;
           if( digi_vox ){
               if( --digi_vox == 0 ){
                  transmit(OFF);
-                // update_frequency(NO_DISPLAY_UPDATE);       // dds back to rx freq
               }
               else if( transmitting == 0 ){
-                // !!! base has been calculated somewhere?
                  transmit(ON);
               }
           }
           else tone_available = 0;
       }
 
-      if( tock ) time_update(), tock = 0;
+      if( tock ) time_update(), tock = 0;                                 // clock display to minutes
+      if( transmitting && tx_msg == 0 ) tx_msg_update(), tx_msg = 1;      // display TX when transmitting
+      if( transmitting == 0 && tx_msg == 1 ) tx_msg_update(), tx_msg = 0;
+
+      uint8_t t = switches();
+      if( t > DONE ){
+         button_( t );
+         sstate[0] = DONE;
+      }
       
    }
 
 }
 
+      /* run the switch state machine, generic code for multiple switches even though have only one here */
+int8_t switches(){
+static uint8_t press_, nopress;
+static uint32_t tm;
+int  i,j;
+int8_t sw;
+int8_t s;
+
+   if( tm == millis() ) return 0;      // run once per millisecond
+   tm = millis();
+   
+   sw = ( digitalRead( SW ) == LOW ) ? 1 : 0;                 
+   
+   if( sw ) ++press_, nopress = 0;       /* only acting on one switch at a time */
+   else ++nopress, press_ = 0;           /* so these simple vars work for all of them */
+
+   /* run the state machine for all switches in a loop */
+   for( i = 0, j = 1; i < 1; ++i ){
+      s = sstate[i];
+      switch(s){
+         case DONE:  if( nopress >= 100 ) s = IDLE_;  break;
+         case IDLE_:  if( ( j & sw ) && press_ >= 30 ) s = ARM;  break; /* pressed */
+         case ARM:
+            if( nopress >= 30 ) s = DARM;                      /* it will be a tap or double tap */
+            if( press_ >= 240 ) s = LONGP;                     // long press
+         break;
+         case DARM:
+            if( nopress >= 240 )  s = TAP;
+            if( press_ >= 30 )    s = DTAP;
+         break;
+      }
+      sstate[i] = s; 
+      j <<= 1;
+   }
+   
+   return sstate[0];      // only one switch implemented so can return its value
+}
+
+
+void button_( uint8_t function ){
+
+    if( transmitting ) return;    // ignore switch during tx or !!! adjust power out
+    switch( function ){
+       case TAP:          // change band
+          if( ++band == NUM_BANDS ) band = 0;
+          cat_qsy( bands[band].freq );
+          group = bands[band].group;
+          slot = 0;                     // avoid tx until settings are finished
+       break;
+       case DTAP:         // change mode
+          if( mode == DIGI ) mode = WSPR, group_enabled = 0;
+          else if( mode == WSPR && group_enabled == 0 ) group_enabled = 1;
+          else if( mode == WSPR && group_enabled == 1 ) mode = DIGI, group_enabled = 0;
+       break;
+       case LONGP:        // save default band in eeprom
+       break;
+    }
+    display_freq();
+    tx_msg_update();
+}
+
 // called each 10th of a second
 void wspr_frame(){
 static int ticks, sec;
-int t;
+//int t;
 //int i;
 static int dir = 1;
 
@@ -374,14 +455,11 @@ static int dir = 1;
       sec = wspr_sec;
       wspr_sec = -1;
    }
-   // reset or mode change, mode change does not want to set timers to zero
-   t = digitalRead( RESET );
-   if( t == LOW || ( wspr_tx_enable && mode != WSPR )){
+   //  mode change
+   if( wspr_tx_enable && mode != WSPR ){
       noInterrupts();
       while( wspr_tx_enable == 1 ) wspr_core();     // finish tx quickly
       interrupts();
-    
-      if( t == LOW ) ticks = 0, sec = 0, slot = 0;   // reset wspr frame to start
    }
 
    if( ++ticks == 10 ){
@@ -396,26 +474,11 @@ static int dir = 1;
          if( band == NUM_BANDS -1 ) dir = -1;
          if( bands[band].group == bands[band + dir].group )  cat_qsy( bands[band + dir].freq );
          else dir = (dir == 1 ) ? -1 : 1;
-       /*
-         if( band != NUM_BANDS - 1 ){
-            for( i = band +1; i < NUM_BANDS; ++i ){
-               if( bands[i].group == bands[band].group ) break;
-            }
-         }
-         else i = NUM_BANDS;
-         
-         if( i == NUM_BANDS ){
-             for( i = 0;  i <= band; ++i ){
-                if( bands[i].group == bands[band].group ) break;
-             }
-         }
-        */ 
-        // if( i != band ) cat_qsy( bands[i].freq );
       }
       
-      if( sec == 0 ){
-        if( ++slot == 10 ) slot = 0;        
-        if( slots[slot] == 1 ) wspr_tx_enable = 1;
+      if( sec == 0 && group == bands[band].group ){   // this allows tx only on bands inside of set group 
+        if( ++slot == 10 ) slot = 0;                  // group changes only using switch on radio to change bands
+        if( slots[slot] == 1  ) wspr_tx_enable = 1;   // rx only bands when using wsjt-x to change bands to outside of group
       }
       if( sec == 30 ) ++frame_count;   // time check at midpoint of minute
    }
@@ -532,6 +595,7 @@ static int i;
    }
 
    if( enable == ON ){
+       if( band == 0 ) return;                      // MF transmit not possible with current divider setup
        digitalWrite( RX_ENABLE_LOW, HIGH );
        delay( 1 );
        si_pll_x(PLLA, freq, bands[band].t_div );    // starts tx at zero beat freq
@@ -607,6 +671,7 @@ int done_;
         
     if( cmd == '?' ){
       get_cmd();
+      group_enabled = 0;                    // in computer control of band switching
      // operate_mode = CAT_MODE;            // switch modes on query cat command
      // if( wwvb_quiet < 2 ) ++wwvb_quiet;  // only one CAT command enables wwvb logging, 2nd or more turns it off
      // mode_display();
@@ -694,17 +759,19 @@ int current_band;
 
 
   if( mode == DIGI ){      // what band are we in
-      if( freq < 5000000 ) band = 0;
-      else if( freq < 9000000 ) band = 1;
-      else if( freq < 12000000 ) band = 2;
-      else if( freq < 15000000 ) band = 3;
-      else if( freq < 19000000 ) band = 4;
-      else if( freq < 22000000 ) band = 5;
-      else if( freq < 26000000 ) band = 6;
-      else band = 7;
+      if( freq < 1000000 ) band = 0;
+      else if( freq < 3000000 ) band = 1;
+      else if( freq < 5000000 ) band = 2;
+      else if( freq < 9000000 ) band = 3;
+      else if( freq < 12000000 ) band = 4;
+      else if( freq < 15000000 ) band = 5;
+      else if( freq < 19000000 ) band = 6;
+      else if( freq < 22000000 ) band = 7;
+      else if( freq < 26000000 ) band = 8;
+      else band = 9;
   }
 
-  group = bands[band].group;
+  // group = bands[band].group;  ? keep tx group control with the unit
   transmit( OFF );
   if( band != current_band ){     // load dividers
        //si_load_divider( int val, int clk , int rst)
