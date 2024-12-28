@@ -37,7 +37,8 @@
 #include <DS3231.h>
 
 #define SI5351 0x60     // I2C address
-#define CLOCK_FREQ 27003760L;            // 3800
+//#define CLOCK_FREQ  27000000L; 
+#define CLOCK_FREQ  27003760L;            // 3800
 //  starting addresses of phase lock loop registers
 #define PLLA 26
 #define PLLB 34
@@ -54,7 +55,7 @@ DS3231 myRTC( Wire1 );
 // #define WCLK  3
  //#define RESET  2    // reset is hardwired to ground on shield 
  
- #define TX_ENABLE 17  // to buffered 17 to A3 pin instead of A3(17). Powers buffer amp.
+ //#define TX_ENABLE 17  // to buffered 17 to A3 pin instead of A3(17). Powers buffer amp.
 
  // wiring on arduino shield but unused for now
 // #define BAND0  7     // relays, drive low to enable
@@ -136,32 +137,31 @@ const uint32_t wspr_msg[] = {
        
 
 
-// 8 bands, 10 slots giving a 20 minute frame
 #define NUM_BANDS 10
 
 struct BANDS {
-   uint32_t freq;
-   uint16_t r_div;
-   uint16_t t_div;
-   uint8_t  group;
-   // float tx_pwr;      // tx bias voltage
+   uint32_t freq;             // wspr frequency
+   uint16_t r_div;            // 4x divider
+   uint16_t t_div;            // 1x divider
+   uint8_t  group;            // share a low pass filter
+   float tx_pwr;              // tx bias voltage
 };
 
 struct BANDS  bands[NUM_BANDS] = {
-  {  474200,254, 254, 5 },               // won't tx, pll out of range, maybe rx with pll out of range. Needs R dividers.
-  { 1836600, 90, 254, 4 },               // maybe tx, pll out of range
-  { 3568600, 48, 194, 0 },
-  {7038600, 26 , 102, 1 },
-  {10138700, 18, 72, 1 },
-  {14095600, 14 , 50, 2 },
-  {18104600, 10 , 40, 2 },
-  {21094600, 10 , 34, 3 },
-  {24924600, 8 , 28, 3 },
-  {28124600, 8 , 26, 3 }
+  {  474200,254, 254, 5, 0.0 },               // won't tx, pll out of range, maybe rx with pll out of range. Needs R dividers.
+  { 1836600, 90, 254, 4, 0.0 },               // maybe tx, pll out of range
+  { 3568600, 48, 194, 0, 2.1 },
+  {7038600, 26 , 102, 1, 2.4 },
+  {10138700, 18, 72, 1, 2.6 },
+  {14095600, 14 , 50, 2, 3.0 },
+  {18104600, 10 , 40, 2, 3.2 },
+  {21094600, 10 , 34, 3, 3.2 },
+  {24924600, 8 , 28, 3, 3.2 },
+  {28124600, 8 , 26, 3, 3.2 }
 };
 // wspr transmit slots in 20 minute frame.  1 == tx,  0 == rx
 const uint8_t slots[10] =
-    { 0,      0,        0,        0,        1,       0,         0,        1,       0,       1
+    { 0,      0,        1,        0,        1,       0,         0,        1,       0,       0
 };
 
 int group_enabled = 0;    // enable or disable the tx groups feature
@@ -200,8 +200,8 @@ void setup() {
  //digitalWrite( RESET, LOW );
  pinMode( RX_ENABLE_LOW, OUTPUT );
  digitalWrite( RX_ENABLE_LOW, HIGH );
- pinMode( TX_ENABLE , OUTPUT );
- digitalWrite( TX_ENABLE, LOW );
+// pinMode( TX_ENABLE , OUTPUT );
+// digitalWrite( TX_ENABLE, LOW );
  pinMode( SW, INPUT_PULLUP );
  analogWriteResolution( 12 );
  analogWrite(A12, 0 );            // tx bias
@@ -223,8 +223,8 @@ void setup() {
     group = bands[band].group;
    // transmit( OFF );
     cat_qsy( freq );
-    si_load_divider( bands[band].r_div, 0 , 0 );
-    si_load_divider( bands[band].t_div, 1 , 1 );
+    si_load_divider( bands[band].r_div, 1 , 0 );
+    si_load_divider( bands[band].t_div, 0 , 1 );
 
    if( mode == WSPR ) myTimer.begin( wspr_core, 682687 );            // 1/1.4648
    wspr_tick = 0;
@@ -232,7 +232,7 @@ void setup() {
    Wire1.begin();     // had to edit WireKinetis.h to enable wire1
    // switch to wire now, rtc and si5351 both on I2C
 
-   i2cd( SI5351, 3, 0b11111110 );      // enable vfo
+   i2cd( SI5351, 3, 0b11111101 );      // enable vfo
    uint32_t t = calc_rx_freq_val( );   // load rx vfo with offset
    si_pll_x(PLLB, t, bands[band].r_div );
 
@@ -241,7 +241,7 @@ void setup() {
 
    LCD.InitLCD();
    LCD.setFont(SmallFont);
-   LCD.print("HELLO RADIO",CENTER,0);
+   LCD.print((char*)"HELLO RADIO",CENTER,0);
    delay(5000);
    LCD.clrScr();
 
@@ -421,13 +421,19 @@ int8_t s;
 
 
 void button_( uint8_t function ){
+int new_band;
 
-    if( transmitting ) return;    // ignore switch during tx or !!! adjust power out
+    if( transmitting ){                             // adjust power setting up or down
+      if( function == TAP ) tx_power( 0.0, 1 );
+      else tx_power( 0.0, -1 );
+      return;   
+    }
     switch( function ){
        case TAP:          // change band
-          if( ++band == NUM_BANDS ) band = 0;
-          cat_qsy( bands[band].freq );
-          group = bands[band].group;
+          new_band = band + 1;
+          if( new_band == NUM_BANDS ) new_band = 0;
+          cat_qsy( bands[new_band].freq );
+          group = bands[new_band].group;
           slot = 0;                     // avoid tx until settings are finished
        break;
        case DTAP:         // change mode
@@ -575,19 +581,38 @@ static int count;
   return;    // timer + WSPRTICK;    
 }
 
+
+void tx_power( float val, int op ){
+static float pwr_level;
+
+    if( op == 0 ){
+      analogWrite(A12, val * 1240.0 );
+      pwr_level = val;
+      return;
+    }
+
+    pwr_level = pwr_level + 0.2 * (float)op;          // adjust power during tx, use to set a default power per band
+    pwr_level = constrain( pwr_level, 0.0, 3.3 );
+    analogWrite(A12, pwr_level * 1240.0 );
+
+   // LCD.printNumF( pwr_level, 2, 0, 2*8 );          // print float doesn't work
+    LCD.printNumI( (int)(pwr_level * 10.0), LEFT, 2*8 );  
+
+}
+
 void transmit( int enable ){
-static float pwr[] = { 2.4, 2.5, 2.6, 2.7 };
-static int i;  
+// static float pwr[] = { 2.4, 2.5, 2.6, 2.7 };
+// static int i;  
 
    if( enable == OFF ){        // set freq to base
        //load_dds( base, POWER_DOWN);   power down results in drift when powered up again
        //pinMode( TX_INHIBIT, OUTPUT );
-       digitalWrite( TX_ENABLE, LOW );
+      // digitalWrite( TX_ENABLE, LOW );
        analogWrite(A12, 0 );
        delay( 1 );
      //  load_dds( calc_rx_freq_val( ), 0 );       // rx at SDR IF freq
        si_pll_x(PLLB, calc_rx_freq_val(), bands[band].r_div );
-       i2cd( SI5351, 3, 0b11111110 );      // enable vfo 
+       i2cd( SI5351, 3, 0b11111101 );      // enable vfo 
        digitalWrite( LED1, LOW );
       // digitalWrite( LED2, LOW );
        digitalWrite( RX_ENABLE_LOW, LOW );
@@ -599,14 +624,12 @@ static int i;
        digitalWrite( RX_ENABLE_LOW, HIGH );
        delay( 1 );
        si_pll_x(PLLA, freq, bands[band].t_div );    // starts tx at zero beat freq
-       i2cd( SI5351, 3, 0b11111101 );               // enable tx vfo 
+       i2cd( SI5351, 3, 0b11111110 );               // enable tx vfo 
        digitalWrite( LED1, HIGH );
       // pinMode( TX_INHIBIT, INPUT );
-      digitalWrite( TX_ENABLE, HIGH );
-      analogWrite(A12, pwr[i] * 1240.0 );
+      // digitalWrite( TX_ENABLE, HIGH );
+      tx_power( bands[band].tx_pwr, 0 );
       transmitting = 1;
-      ++i;                                         // more power
-      i &= 3;
    }
 }
 
@@ -775,8 +798,8 @@ int current_band;
   transmit( OFF );
   if( band != current_band ){     // load dividers
        //si_load_divider( int val, int clk , int rst)
-       si_load_divider( bands[band].r_div, 0 , 0 );
-       si_load_divider( bands[band].t_div, 1 , 1 );
+       si_load_divider( bands[band].r_div, 1 , 0 );
+       si_load_divider( bands[band].t_div, 0 , 1 );
   }
   display_freq();
 }

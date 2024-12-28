@@ -1,7 +1,7 @@
 /*
 #Do not modify t,e contents of t,is file.
 #BEGIN_PROFILE
-#Date = Monday, 0x December 23, 0x 2024 9:09:22 PM
+#Date = Friday, 0x December 27, 0x 2024 5:02:34 PM
 #Software version = 6.2.1 - May 13, 0x 2014
 #File version = 3
 #Part number = Si5351A-x-GT
@@ -11,24 +11,24 @@
 # Input Frequency (M,z) = 27.000000000
 # F divider = 1
 # PFD (M,z) = 27.000000000
-# VCO Frequency (M,z) =  730.094400000
-# Feedback Divider = 27  76/1875
+# VCO Frequency (M,z) =  648.972800000
+# Feedback Divider = 24  608/16875
 # Internal Load Cap (pf) = 10
 # SSC disabled
 #PLL B
 # Input Frequency (M,z) = 27.000000000
 # F divider = 1
 # PFD (M,z) = 27.000000000
-# VCO Frequency (M,z) =  729.914400000
-# Feedback Divider = 27  127/3750
+# VCO Frequency (M,z) =  729.986400000
+# Feedback Divider = 27  137/3750
 # Pull Range (±ppm) = 0.0
 #Output Clocks
 #C,annel 0
-# Output Frequency (M,z) = 40.550800000
-# Multisynt, Output Frequency (M,z) = 40.550800000
-# Multisynt, Divider = 18
+# Output Frequency (M,z) = 10.140200000
+# Multisynt, Output Frequency (M,z) = 10.140200000
+# Multisynt, Divider = 64
 # R Divider = 1
-# PLL source = PLLB
+# PLL source = PLLA
 # Initial p,ase offset (ns) = 0.000
 # Error (ppm) = 0.0000
 # Powered = On
@@ -37,11 +37,11 @@
 # Disable State = Low
 # Clock Source = b11
 #C,annel 1
-# Output Frequency (M,z) = 10.140200000
-# Multisynt, Output Frequency (M,z) = 10.140200000
-# Multisynt, Divider = 72
+# Output Frequency (M,z) = 40.554800000
+# Multisynt, Output Frequency (M,z) = 40.554800000
+# Multisynt, Divider = 18
 # R Divider = 1
-# PLL source = PLLA
+# PLL source = PLLB
 # Initial p,ase offset (ns) = 0.000
 # Error (ppm) = 0.0000
 # Powered = On
@@ -69,7 +69,7 @@ const uint8_t si5351_reg[] PROGMEM = {
  // 0, 0x00,
  // 1, 0x00,
  // 2, 0x18,
-  3, 0x00,     // edit to 0xff in 20m clockbuilder
+  3, 0xff,    //0x00,
  // 4, 0x00,
  // 5, 0x00,
  // 6, 0x00,
@@ -82,8 +82,8 @@ const uint8_t si5351_reg[] PROGMEM = {
  //13, 0x00,
  //14, 0x00,
  15, 0x00,
- 16, 0x6F,
- 17, 0x4F,
+ 16, 0x4F,
+ 17, 0x6F,
  18, 0x80,
  19, 0x80,
  20, 0x80,
@@ -92,26 +92,26 @@ const uint8_t si5351_reg[] PROGMEM = {
  23, 0x80,
  24, 0x00,
  25, 0x00,
- 26, 0x07,
- 27, 0x53,
+ 26, 0x41,
+ 27, 0xEB,
  28, 0x00,
- 29, 0x0B,
- 30, 0x85,
+ 29, 0x0A,
+ 30, 0x04,
  31, 0x00,
- 32, 0x01,
- 33, 0x61,
+ 32, 0x28,
+ 33, 0x54,
  34, 0x0E,
  35, 0xA6,
  36, 0x00,
  37, 0x0B,
  38, 0x84,
  39, 0x00,
- 40, 0x04,
+ 40, 0x09,
  41, 0xE8,
  42, 0x00,
  43, 0x01,
  44, 0x00,
- 45, 0x07,
+ 45, 0x1E,
  46, 0x00,
  47, 0x00,
  48, 0x00,
@@ -119,7 +119,7 @@ const uint8_t si5351_reg[] PROGMEM = {
  50, 0x00,
  51, 0x01,
  52, 0x00,
- 53, 0x22,
+ 53, 0x07,
  54, 0x00,
  55, 0x00,
  56, 0x00,
@@ -299,6 +299,7 @@ const uint8_t si5351_reg[] PROGMEM = {
 //230, 0x00,
 //231, 0x00,
 //232, 0x00,
-255, 0xff 
+255, 0xff
 };
+
 // #END_PROFILE
