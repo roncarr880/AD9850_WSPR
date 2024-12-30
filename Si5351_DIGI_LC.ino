@@ -35,10 +35,12 @@
 
 #include <Wire.h>
 #include <DS3231.h>
+#include <AT24CX1.h>
 
 #define SI5351 0x60     // I2C address
 //#define CLOCK_FREQ  27000000L; 
-#define CLOCK_FREQ  27003760L;            // 3800
+//#define CLOCK_FREQ  27003760L;            // 3800
+#define CLOCK_FREQ  27003730L;            // 3800
 //  starting addresses of phase lock loop registers
 #define PLLA 26
 #define PLLB 34
@@ -47,6 +49,7 @@
 
 
 DS3231 myRTC( Wire1 );
+AT24C32 eeprom(7);
 
  //  Arduino shield pin assignments for AD9850 module
 
@@ -93,8 +96,8 @@ DS3231 myRTC( Wire1 );
  #define SW   20        // on board switch, wired to reset then to pin 20.  LC does not have a reset function.
  uint8_t sstate[1];     // button switch state array.  One switch.
 
- #define ON 1
- #define OFF 0
+ #define ON_ 1
+ #define OFF_ 2
 // #define POWER_DOWN  0x4
 
  #define LED1  13
@@ -102,7 +105,7 @@ DS3231 myRTC( Wire1 );
 
  #define WSPR 0
  #define DIGI 1
-// #define USB 2
+ #define SSB  2
 // #define LSB 3
 
  #define stage(c) Serial.write(c)
@@ -169,13 +172,17 @@ int group = 1;            // bands that share a filter
 int band = 4;             // 3 == 40 meters.   4 == 30 meters
 
 int slot;
-int mode = WSPR;  // !!! should maybe start in a mode that doesn't transmit by itsself
+int mode = WSPR;     // start up in WSPR frame mode, can be changed by WSJT until
+int mode_stuck = 0;  // user presses the switch to change mode, then it is stuck where it was set manually
 int wspr_sec = -1;   // for correcting time in wspr frame
 int frame_count;     // for when to check frame timing.
 
 volatile uint32_t tone_;              // FT8 tone detection variables, tone_ is in 25ns ticks
 volatile uint8_t tone_available;
 volatile uint8_t digi_vox;
+volatile uint8_t phase_change;
+volatile uint8_t t_control;
+volatile float tone_offset;           // tone to send
 
 
 IntervalTimer myTimer;
@@ -187,6 +194,8 @@ elapsedMillis wspr_tick;
 uint8_t transmitting;
 uint8_t tock;
 uint8_t tx_msg;
+int report_ramp;          // audio level for phase reversal
+int report_count;
 
 
 void setup() {
@@ -217,20 +226,24 @@ void setup() {
    delay( 5 );
    si5351_init();
 
-//   dds_init();
-
-    freq = bands[band].freq;
-    group = bands[band].group;
-   // transmit( OFF );
-    cat_qsy( freq );
-    si_load_divider( bands[band].r_div, 1 , 0 );
-    si_load_divider( bands[band].t_div, 0 , 1 );
-
-   if( mode == WSPR ) myTimer.begin( wspr_core, 682687 );            // 1/1.4648
-   wspr_tick = 0;
-
    Wire1.begin();     // had to edit WireKinetis.h to enable wire1
    // switch to wire now, rtc and si5351 both on I2C
+
+    freq = bands[band].freq;            // defaults before eeprom restore
+    group = bands[band].group;
+
+   LCD.InitLCD();
+   LCD.setFont(SmallFont);
+   LCD.print((char*)"HELLO RADIO",CENTER,0);
+   restore_eeprom();
+   delay(5000);
+   LCD.clrScr();
+
+   // cat_qsy( freq );
+    transmit( OFF_ );
+    si_load_divider( bands[band].r_div, 1 , 0 );
+    si_load_divider( bands[band].t_div, 0 , 1 );
+    display_freq();
 
    i2cd( SI5351, 3, 0b11111101 );      // enable vfo
    uint32_t t = calc_rx_freq_val( );   // load rx vfo with offset
@@ -239,20 +252,80 @@ void setup() {
    // load tx freq to get the P1 P2 P3 saved solution
    si_pll_x( PLLA, freq, bands[band].t_div );     // wspr_offset + wspr_msg[] for sending wspr
 
-   LCD.InitLCD();
-   LCD.setFont(SmallFont);
-   LCD.print((char*)"HELLO RADIO",CENTER,0);
-   delay(5000);
-   LCD.clrScr();
-
-
    display_freq();
    tock = 1;
 
       // set initial WSPR clock
+   timer_control();
    frame_time_check();
-   wspr_tick = 0;
+   wspr_tick = 0;                            // if wspr then wspr_core else digi_core
    
+}
+
+void timer_control(){
+  
+  myTimer.end();
+  if( mode == WSPR )  myTimer.begin(wspr_core, 682687);
+ //!!! not ready to enable, stuck in tx      else if( mode == DIGI ) myTimer.begin( digi_core, 1000.0/16.0 );     // 16 k sample rate
+  
+}
+
+void restore_eeprom(){
+int err;
+
+   // check for valid band and wspr freq
+   err = 0;
+
+   uint8_t b = eeprom.read(0);
+   uint8_t m = eeprom.read(1);
+   uint8_t g = eeprom.read(2);
+   uint8_t ge = eeprom.read(3);
+   uint32_t f = eeprom.readLong( 4 );
+
+   if( b >= NUM_BANDS ){
+      LCD.print( (char*)"Band NG", LEFT, 2*8 );
+      ++err;
+   }
+
+   if( m == WSPR && f != bands[b].freq ){
+      LCD.print( (char*)"Freq NG", LEFT, 3*8 );
+      ++err;
+   }
+
+   if( f < 400000 || f > 30000000 ){
+      LCD.print( (char*)"Freq NG", LEFT, 3*8 );
+      ++err;
+   }
+
+   if( m > SSB || g > 5 || ge > 1 ){
+      LCD.print( (char*)"Flags NG", LEFT, 4*8 );
+      ++err;  
+   }
+
+   if( g != bands[b].group ){
+      LCD.print( (char*)"Group NG", LEFT, 5*8 );
+      ++err;
+   }
+
+   if( err == 0 ) band = b, freq = f, group_enabled = ge, group = g, mode = m;
+  
+}
+
+void save_eeprom(){
+
+  eeprom.write( 0, (uint8_t)band );
+  eeprom.write( 1, (uint8_t)mode );
+  eeprom.write( 2, (uint8_t)group);
+  eeprom.write( 3, (uint8_t)group_enabled);
+  eeprom.writeLong( 4, freq );
+
+  LCD.clrRow(0);
+  LCD.clrRow(1);
+  LCD.print((char*)"Setup Saved",LEFT,0);
+  delay(3000);
+  LCD.clrRow(0);
+  LCD.clrRow(1);
+  time_update(); 
 }
 
 void frame_time_check(){
@@ -315,6 +388,7 @@ int f;
       LCD.clrRow( 5, 0, 13 );
    }
    if( mode == DIGI ) LCD.print((char*)"DIGI",RIGHT,2*8);
+   else if( mode == SSB ) LCD.print((char*)"SSB ",RIGHT,2*8);
    else LCD.print((char*)"WSPR",RIGHT,2*8);
 }
 
@@ -329,9 +403,32 @@ void tx_msg_update(){
 void loop() {
 uint32_t tone2;
 static uint32_t tm;
+static uint8_t flip;
+int8_t t1, t2;
+float t_off;
 
 
     radio_control();     // CAT
+
+    noInterrupts();
+     t1 = phase_change;
+     t2 = t_control;
+     t_control = phase_change = 0;
+     t_off = tone_offset;
+     tone_offset = -1.0;
+    interrupts(); 
+     
+    if( t1 ){                           // can we send psk31 with wave shaping and phase reverals based upon signal level
+      if( flip ) i2cd( SI5351, 16, 0x4f );        // reverse phase (4f 5f) if signal level fell and returned
+      else i2cd( SI5351, 16, 0x5f );
+      flip ^= 1;
+    }
+    if( t2 ){
+       transmit(t2);
+    }
+    if( t_off > 0.0 ){
+        si_tone_offset( t_off );
+    }
   
     if( wspr_tick >= 100 ){
        wspr_tick -= 100;
@@ -354,17 +451,16 @@ static uint32_t tm;
 // 1 ms rate code
    if( tm != millis() ){
       tm = millis(); 
-   
-      if( mode == DIGI ){                   // vox check
-          if( digi_vox ){
-              if( --digi_vox == 0 ){
-                 transmit(OFF);
-              }
-              else if( transmitting == 0 ){
-                 transmit(ON);
-              }
+
+      if( mode == DIGI ){ 
+          noInterrupts();
+           int v = report_ramp;
+          interrupts();
+
+          if( ++report_count > 300 ){
+              report_count = 0;
+              if( transmitting ) LCD.printNumI( v, LEFT, 2*8 );           // adjust audio level for 2 or 3 I think
           }
-          else tone_available = 0;
       }
 
       if( tock ) time_update(), tock = 0;                                 // clock display to minutes
@@ -439,9 +535,13 @@ int new_band;
        case DTAP:         // change mode
           if( mode == DIGI ) mode = WSPR, group_enabled = 0;
           else if( mode == WSPR && group_enabled == 0 ) group_enabled = 1;
-          else if( mode == WSPR && group_enabled == 1 ) mode = DIGI, group_enabled = 0;
+          else if( mode == WSPR && group_enabled == 1 ) mode = SSB, group_enabled = 0;
+          else mode = DIGI;
+          mode_stuck = 1; // user selected mode, no longer changed by CAT control
+          timer_control();
        break;
        case LONGP:        // save default band in eeprom
+          save_eeprom();
        break;
     }
     display_freq();
@@ -567,14 +667,15 @@ static int count;
   if( wspr_tx_enable == 0 )   return;   //timer + WSPRTICK;   // nothing to do
 
   if( count == 162 ) {   // stop the transmitter
-     transmit(OFF);
+     t_control = OFF_;          //transmit(OFF_);
      wspr_tx_enable = 0;
      count = 0;
      return;    // timer + WSPRTICK;
   }
     
-  if( count == 0 ) transmit(ON);
-  si_tone_offset( (float)wspr_offset + wspr_msg[count] * 1.4648 );
+  if( count == 0 ) t_control = ON_;    //transmit(ON_);
+  tone_offset = (float)wspr_offset + wspr_msg[count] * 1.4648;
+  // si_tone_offset( (float)wspr_offset + wspr_msg[count] * 1.4648 );
   
   ++count;
    
@@ -592,11 +693,12 @@ static float pwr_level;
     }
 
     pwr_level = pwr_level + 0.2 * (float)op;          // adjust power during tx, use to set a default power per band
-    pwr_level = constrain( pwr_level, 0.0, 3.3 );
+    if( mode == WSPR ) pwr_level = constrain( pwr_level, 0.0, 3.3 );
+    else pwr_level = constrain( pwr_level, 0.0, bands[band].tx_pwr );
     analogWrite(A12, pwr_level * 1240.0 );
 
    // LCD.printNumF( pwr_level, 2, 0, 2*8 );          // print float doesn't work
-    LCD.printNumI( (int)(pwr_level * 10.0), LEFT, 2*8 );  
+    if( mode == WSPR ) LCD.printNumI( (int)(pwr_level * 10.0), LEFT, 2*8 );  
 
 }
 
@@ -604,22 +706,19 @@ void transmit( int enable ){
 // static float pwr[] = { 2.4, 2.5, 2.6, 2.7 };
 // static int i;  
 
-   if( enable == OFF ){        // set freq to base
-       //load_dds( base, POWER_DOWN);   power down results in drift when powered up again
-       //pinMode( TX_INHIBIT, OUTPUT );
-      // digitalWrite( TX_ENABLE, LOW );
+   if( enable == OFF_ ){
+       noInterrupts();
+       transmitting = 0;
        analogWrite(A12, 0 );
+       interrupts();
        delay( 1 );
-     //  load_dds( calc_rx_freq_val( ), 0 );       // rx at SDR IF freq
        si_pll_x(PLLB, calc_rx_freq_val(), bands[band].r_div );
        i2cd( SI5351, 3, 0b11111101 );      // enable vfo 
        digitalWrite( LED1, LOW );
-      // digitalWrite( LED2, LOW );
        digitalWrite( RX_ENABLE_LOW, LOW );
-       transmitting = 0;
    }
 
-   if( enable == ON ){
+   if( enable == ON_ ){
        if( band == 0 ) return;                      // MF transmit not possible with current divider setup
        digitalWrite( RX_ENABLE_LOW, HIGH );
        delay( 1 );
@@ -628,8 +727,11 @@ void transmit( int enable ){
        digitalWrite( LED1, HIGH );
       // pinMode( TX_INHIBIT, INPUT );
       // digitalWrite( TX_ENABLE, HIGH );
-      tx_power( bands[band].tx_pwr, 0 );
+      noInterrupts();
+      if( mode == WSPR ) tx_power( bands[band].tx_pwr, 0 );
+      else tx_power( 0.0, 0 );                      // start digi power low and ramp up
       transmitting = 1;
+      interrupts();
    }
 }
 
@@ -659,7 +761,7 @@ uint32_t fq;
 
 #define CMDLEN 20
 char command[CMDLEN];
-uint8_t vfo = 'A';
+uint8_t vfo = 'A';             // fake dual vfo's for CAT
 
 void radio_control() {
 static int expect_len = 0;
@@ -694,15 +796,10 @@ int done_;
         
     if( cmd == '?' ){
       get_cmd();
-      group_enabled = 0;                    // in computer control of band switching
-     // operate_mode = CAT_MODE;            // switch modes on query cat command
-     // if( wwvb_quiet < 2 ) ++wwvb_quiet;  // only one CAT command enables wwvb logging, 2nd or more turns it off
-     // mode_display();
     }
     if( cmd == '*' )  set_cmd();
     if( cmd == '#' ){
         pnd_cmd(); 
-       // if( wwvb_quiet < 2 ) ++wwvb_quiet;  // allow FRAME mode and the serial logging at the same time
     }
 
  /* prepare for next command */
@@ -741,7 +838,8 @@ unsigned long val4;
     case 'A':   // set frequency
     case 'B':
        val4 = get_long();
-       cat_qsy(val4);  
+       cat_qsy(val4);
+       group_enabled = 0;    // computer is changing freq, disable frame band switching groups
     break;
     case 'E':
        if( command[2] == 'V' ) vfo = command[3];
@@ -763,25 +861,28 @@ unsigned long val4;
 void cat_qsy( unsigned long val ){
 int i;
 int current_band;
+int current_mode;
 
   if( transmitting ) return;
   current_band = band;
+  current_mode = mode;
   
   // see if can find freq in our table
   for( i = 0; i < NUM_BANDS; ++i ){
        if( val == bands[i].freq ){
-        band = i, mode = WSPR;
-        break;
+          band = i;
+          if( mode_stuck == 0 ) mode = WSPR;
+          break;
        }
   }
-  if( i == NUM_BANDS ) mode = DIGI;     // not qsy to a WSPR freq
-
+  
   freq = val;
-//  base = (float)freq * DDS_1hz;
-//  base += (float)freq * trim_ * DDS_1hz;
 
+  if( i == NUM_BANDS ){        // not wspr mode
 
-  if( mode == DIGI ){      // what band are we in
+      if( mode != SSB ) mode = DIGI;    // change to digi unless running in SSB receive only mode   
+
+         // what band are we in
       if( freq < 1000000 ) band = 0;
       else if( freq < 3000000 ) band = 1;
       else if( freq < 5000000 ) band = 2;
@@ -794,14 +895,15 @@ int current_band;
       else band = 9;
   }
 
-  // group = bands[band].group;  ? keep tx group control with the unit
-  transmit( OFF );
+  // group = bands[band].group;  ? keep tx group control with the unit controls
+  transmit( OFF_ );
   if( band != current_band ){     // load dividers
        //si_load_divider( int val, int clk , int rst)
        si_load_divider( bands[band].r_div, 1 , 0 );
        si_load_divider( bands[band].t_div, 0 , 1 );
   }
   display_freq();
+  if( mode != current_mode ) timer_control();
 }
 
 
@@ -1008,26 +1110,51 @@ bool pmFlag;
 }
 
 
-//  tone detection based upon counting 25 ns ticks since last zero cross
-//  20.8333333333333 ns with 48meg clock
-//  FT8 etc modes tx tone detection, DDS updated from loop
+//  tone detection based upon counting 25 ns ticks since last zero cross-chipkit version
+//  20.8333333333333 ns ticks with 48meg clock - Teensy LC version
+//  FT8 etc modes tx tone detection
+//  moving all I2C calls to loop using flags
 void digi_core( ){
 int data;
 static int last;
 static uint32_t start_tm;                               // last timer value
 static uint32_t total_tm;
+static int ramp;
 uint32_t timer;
 uint32_t fraction;                                      // counts past zero cross
 uint32_t tm;
 int spread;
+const float rcos[] = { 0.156, 0.309, 0.454, 0.588, 0.707, 0.809, 0.891, 0.985, 1.0 };
+static int dir;
+static int ticks;
 
   timer = SYST_CVR;
-   
-  data = analogRead( A0 ) - 2048;
- // tm = timer - start_tm;
+   // tm = timer - start_tm;
   tm = start_tm - timer;        // counts down
   start_tm = timer;
   total_tm += tm;
+  ++ticks;
+  ticks &= 15;                    // 16k sample rate
+
+   
+  data = analogRead( A0 ) - 2048;
+  if( abs(data) > 310 ) digi_vox = 5;
+
+  if( digi_vox ){
+     if( transmitting == 0 ) t_control = ON_ , ticks = 2;      //transmit( ON_ );
+     if( ticks == 0 ){
+        --digi_vox;
+        if( digi_vox == 0 ){
+           t_control = OFF_;                       //transmit( OFF_ );
+           tone_available = 0;
+           return;
+        }
+     }
+  }
+  else{
+     total_tm = 0, ramp = 0, dir = 0;
+     return;
+  }
 
   if( data > 0 && last <= 0 ){                          // zero cross detected
       spread = data-last;                               // last is always negative
@@ -1038,16 +1165,24 @@ int spread;
   }
   last = data;
 
-  if( abs(data) > 310 ) digi_vox = 10;                   // 10ms vox hang time
-  if( digi_vox == 0 ){
-      total_tm = 0;
-      return; // timer + CORE_TICK_RATE/3;                 // vox check only, 3k sample rate
+  if( transmitting ){                                   // wave shaping
+     if( digi_vox > 2 && ramp < 9 ){
+        tx_power( rcos[ramp] * bands[band].tx_pwr, 0 );
+        ++ramp;    // up to tx_pwr for this band
+        if( dir != 1 ){
+            phase_change = 1;
+            report_ramp = ramp;                         // debug or level setting
+        }
+        dir = 1;
+     }
+     if( digi_vox <= 2  && ramp > 0  ){
+       --ramp;
+       tx_power( rcos[ramp] * bands[band].tx_pwr , 0 );
+       dir = -1;
+     }
   }
-   
-  return; //timer + CORE_TICK_RATE/20;                     // sample rate when transmitting
   
 }
-
 
 
 uint32_t median( uint32_t val ){
@@ -1085,6 +1220,7 @@ float val2;
   if( millis() - tm < 5 ) return;             // 5ms is 1/32 baud overlap of 6 baud, 10ms 1/16 fuzzy area
   tm = millis();
 
+  if( count == 0 ) return;
   val2 = (float)tval / (float)count;          // average value over N ms
   if( val2 == 0 ) return;
   //val2 = 40000000.0f / val2;                  // convert ticks to audio tone, chipkit version
@@ -1093,8 +1229,9 @@ float val2;
   
  // dds_val = (long)(( tx_vfo + val2 )  * (268.435456e6 / Reference ));  
  // wspr_to_freq( dds_val );
-
   // debug on arduino plotter
+
+    analogWrite(A12, 0 );    /// !!! keep tx off while debugging tone calculation
     Serial.println(val2);
 }
 
@@ -1219,6 +1356,7 @@ void si_tone_offset( float val ){
 
 void i2init(){
     Wire.begin();
+    Wire.setClock( 400000 );
 }
 
 void i2start( unsigned char address ){
