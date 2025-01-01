@@ -4,7 +4,7 @@
  *   QRP Labs Arduio Shield
  *   QRP Labs Reciever Module
  *   DS3231 RTC
- *   USB HUB, USB sound card.  USB powered.
+ *   USB HUB, USB sound card.  All USB powered.
  *   
  *   From AD9850_WSPR_LC - changed to a Si5351 clocks module
  *   
@@ -119,7 +119,7 @@ AT24C32 eeprom(7);
 //const float trim_ = 15.0 / 10000000.0;     // freq error as percent of 10 meg, 50?. 
 
 uint32_t  freq = 10138700;          // SSB base frequency
-uint32_t  wspr_offset = 1500;       // 1400 to 1600 valid value
+uint32_t  wspr_offset = 1530;       // 1400 to 1600 valid value
 // rx has 474 caps so it is a very narrow band sdr
 uint32_t  IF_freq = 4000;           // HDSDR offset away from zero beat noise
                          
@@ -194,8 +194,11 @@ elapsedMillis wspr_tick;
 uint8_t transmitting;
 uint8_t tock;
 uint8_t tx_msg;
-int report_ramp;          // audio level for phase reversal
-int report_count;
+//int report_ramp;          // audio level for phase reversal
+//int report_count;
+#define UP 1
+#define DOWN 2
+int ramp_flag;
 
 
 void setup() {
@@ -266,7 +269,7 @@ void timer_control(){
   
   myTimer.end();
   if( mode == WSPR )  myTimer.begin(wspr_core, 682687);
- //!!! not ready to enable, stuck in tx      else if( mode == DIGI ) myTimer.begin( digi_core, 1000.0/16.0 );     // 16 k sample rate
+  else if( mode == DIGI ) myTimer.begin( digi_core, 1000.0/16.0 );     // 16 k sample rate
   
 }
 
@@ -403,26 +406,26 @@ void tx_msg_update(){
 void loop() {
 uint32_t tone2;
 static uint32_t tm;
-static uint8_t flip;
-int8_t t1, t2;
+//static uint8_t flip;
+int8_t  t2;
 float t_off;
 
 
     radio_control();     // CAT
 
     noInterrupts();
-     t1 = phase_change;
+    // t1 = phase_change;
      t2 = t_control;
      t_control = phase_change = 0;
      t_off = tone_offset;
      tone_offset = -1.0;
     interrupts(); 
      
-    if( t1 ){                           // can we send psk31 with wave shaping and phase reverals based upon signal level
-      if( flip ) i2cd( SI5351, 16, 0x4f );        // reverse phase (4f 5f) if signal level fell and returned
-      else i2cd( SI5351, 16, 0x5f );
-      flip ^= 1;
-    }
+    //if( t1 ){                           // can we send psk31 with wave shaping and phase reverals based upon signal level
+    //  if( flip ) i2cd( SI5351, 16, 0x4f );        // reverse phase (4f 5f) if signal level fell and returned
+    //  else i2cd( SI5351, 16, 0x5f );
+    //  flip ^= 1;
+    //}
     if( t2 ){
        transmit(t2);
     }
@@ -454,13 +457,18 @@ float t_off;
 
       if( mode == DIGI ){ 
           noInterrupts();
-           int v = report_ramp;
-          interrupts();
-
-          if( ++report_count > 300 ){
-              report_count = 0;
-              if( transmitting ) LCD.printNumI( v, LEFT, 2*8 );           // adjust audio level for 2 or 3 I think
+          // int v = report_ramp;
+          if( digi_vox ){
+              if( transmitting == 0 ) t_control = ON_, ramp_flag = UP;
+              if( --digi_vox == 0 ) t_control = OFF_,  ramp_flag = DOWN;
           }
+          interrupts();
+          if( ramp_flag == DOWN ) ramp(DOWN), ramp_flag = 0;
+
+        //  if( ++report_count > 300 ){
+        //      report_count = 0;
+        //      if( transmitting ) LCD.printNumI( v, LEFT, 2*8 );           // adjust audio level for 2 or 3 I think
+        //  }
       }
 
       if( tock ) time_update(), tock = 0;                                 // clock display to minutes
@@ -1117,6 +1125,95 @@ bool pmFlag;
 void digi_core( ){
 int data;
 static int last;
+static int32_t start_tm;                               // last timer value
+static int32_t total_tm;
+//static int ramp;
+int32_t timer;
+int32_t fraction;                                      // counts past zero cross
+int32_t tm;
+int spread;
+//const float rcos[] = { 0.156, 0.309, 0.454, 0.588, 0.707, 0.809, 0.891, 0.985, 1.0 };
+//static int dir;
+//static int ticks;
+
+// SYST_CVR counts down from 48000 to zero and repeats
+
+  timer = SYST_CVR;
+ // tm = timer - start_tm;
+  tm = start_tm - timer;        // counts down
+  start_tm = timer;
+  if( tm < 0 ) tm += 48000;
+  total_tm += tm;
+  
+ // ++ticks;
+ // ticks &= 15;                    // 16k sample rate
+
+   
+  data = analogRead( A0 ) - 2048;
+  if( abs(data) > 110 ) digi_vox = 10;
+
+  if( digi_vox == 0 ){
+     total_tm = 0;
+     return;
+  }
+
+/*
+  if( digi_vox ){
+     if( transmitting == 0 ) t_control = ON_ , ticks = 2;      //transmit( ON_ );
+     if( ticks == 0 ){
+        --digi_vox;
+        if( digi_vox == 0 ){
+           t_control = OFF_;                       //transmit( OFF_ );
+           tone_available = 0;
+           return;
+        }
+     }
+  }
+  else{
+     total_tm = 0, ramp = 0, dir = 0;
+     return;
+  }
+  */
+
+  if( data > 0 && last <= 0 ){                          // zero cross detected
+      spread = data-last;                               // last is always negative
+      fraction =  ( data * tm ) / spread;               // ticks past zero
+      tone_ = total_tm - fraction;                      // sub ticks past zero cross
+      total_tm = fraction;                              // add fraction past zero as start amount for next cycle
+      tone_available = 1;    
+  }
+  last = data;
+
+/*
+  if( transmitting ){                                   // wave shaping
+     if( digi_vox > 2 && ramp < 9 ){
+        tx_power( rcos[ramp] * bands[band].tx_pwr, 0 );
+        ++ramp;    // up to tx_pwr for this band
+        if( dir != 1 ){
+          //  phase_change = 1;
+            report_ramp = ramp;                         // debug or level setting
+        }
+        dir = 1;
+     }
+     if( digi_vox <= 2  && ramp > 0  ){
+       --ramp;
+       tx_power( rcos[ramp] * bands[band].tx_pwr , 0 );
+       dir = -1;
+     }
+  }
+  */
+  
+}
+
+
+/*
+//  tone detection based upon counting 25 ns ticks since last zero cross-chipkit version
+//  20.8333333333333 ns ticks with 48meg clock - Teensy LC version
+//  FT8 etc modes tx tone detection
+//  moving all I2C calls to loop using flags
+void digi_core( ){
+int data;
+static int last;
 static uint32_t start_tm;                               // last timer value
 static uint32_t total_tm;
 static int ramp;
@@ -1128,8 +1225,11 @@ const float rcos[] = { 0.156, 0.309, 0.454, 0.588, 0.707, 0.809, 0.891, 0.985, 1
 static int dir;
 static int ticks;
 
+//Serial.println( SYST_CVR );
+return;
+
   timer = SYST_CVR;
-   // tm = timer - start_tm;
+ // tm = timer - start_tm;
   tm = start_tm - timer;        // counts down
   start_tm = timer;
   total_tm += tm;
@@ -1138,7 +1238,7 @@ static int ticks;
 
    
   data = analogRead( A0 ) - 2048;
-  if( abs(data) > 310 ) digi_vox = 5;
+  if( abs(data) > 110 ) digi_vox = 5;
 
   if( digi_vox ){
      if( transmitting == 0 ) t_control = ON_ , ticks = 2;      //transmit( ON_ );
@@ -1183,6 +1283,7 @@ static int ticks;
   }
   
 }
+*/
 
 
 uint32_t median( uint32_t val ){
@@ -1202,22 +1303,23 @@ uint8_t j,i,k;                               // low, median, high
    return vals[i];
 }
 
-// ft8_tx version using 25ns ticks.
+// ft8 tx or any single tone digi mode
 void ft8_tx( uint32_t val ){
-long dds_val;
 static uint32_t tm;
 static uint32_t tval;
 static int count;
 float val2;
 
-  if( val < 15600 || val > 240000 ) return;   // 25ns ticks for 3000 to 200 hz  
 
-  val = median( val );                        // remove glitches in the data stream
+  if( val < 15600 || val > 240000 ) return;   // < 25ns ticks for 3000 to 200 hz  
+
+ // val = median( val );                      // remove glitches in the data stream, introduces noise - perhaps noise comes in pairs
   tval += val;
   ++count;
   
-  // 3ms updates, 333 baud.  10ms updates, 100 baud.  20ms is 50 updates a second
-  if( millis() - tm < 5 ) return;             // 5ms is 1/32 baud overlap of 6 baud, 10ms 1/16 fuzzy area
+  // 3ms updates, 333 baud.  10ms updates, 100 baud.  20ms is 50 updates a second.  5ms may be better for ft4.  Has more noise than 10
+  // 10ms has 100hz fm modulation.  5ms would have 200hz modulation.
+  if( millis() - tm < 10 ) return;             // 5ms is 1/32 baud overlap of 6 baud, 10ms 1/16 fuzzy area
   tm = millis();
 
   if( count == 0 ) return;
@@ -1226,13 +1328,33 @@ float val2;
   //val2 = 40000000.0f / val2;                  // convert ticks to audio tone, chipkit version
   val2 =  48000000.0f / val2;                   // 20.8333333333333f ns per count
   count = 0;  tval = 0;
-  
- // dds_val = (long)(( tx_vfo + val2 )  * (268.435456e6 / Reference ));  
- // wspr_to_freq( dds_val );
-  // debug on arduino plotter
 
-    analogWrite(A12, 0 );    /// !!! keep tx off while debugging tone calculation
-    Serial.println(val2);
+ // if( digi_vox <= 2 ) return;    // transmission ending - keep current tone.
+  
+    si_tone_offset( val2 );  // or tone_offset = val2 and loop will send it
+     
+  // Serial.println(val2);    // !!! debug arduino serial plotter  OOB on WSJT-x if left on
+  if( ramp_flag == UP ) ramp( UP ), ramp_flag = 0;
+}
+
+
+void ramp( int way ){
+const float rcos[] = { 0.156, 0.309, 0.454, 0.588, 0.707, 0.809, 0.891, 0.985, 1.0 };
+int i;
+
+  if( way == UP ){
+      for( i = 0; i < 9; ++i ){
+        tx_power( rcos[i] * bands[band].tx_pwr , 0);
+        delayMicroseconds( 222 );                       // 2ms power ramp
+      }
+  }
+  if( way == DOWN ){
+      for( i = 8; i >= 0; --i ){
+        tx_power( rcos[i] * bands[band].tx_pwr , 0);
+        delayMicroseconds( 222 );                 
+      }
+  }
+  
 }
 
 // load the clock builder data
