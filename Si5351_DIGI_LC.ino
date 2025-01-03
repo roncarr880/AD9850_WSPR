@@ -183,6 +183,7 @@ volatile uint8_t digi_vox;
 volatile uint8_t phase_change;
 volatile uint8_t t_control;
 volatile float tone_offset;           // tone to send
+volatile int digi_peak;               // digi audio level
 
 
 IntervalTimer myTimer;
@@ -436,6 +437,7 @@ float t_off;
     if( wspr_tick >= 100 ){
        wspr_tick -= 100;
        wspr_frame();               // keep time even if not wspr mode
+       if( mode == DIGI && transmitting ) audio_level_display();
     }
     if( frame_count >= 31 ){
         frame_time_check();        // adjust wspr counter to match RTC
@@ -483,6 +485,25 @@ float t_off;
       
    }
 
+}
+
+
+void audio_level_display(){         // show audio level as a number 0 to 9
+int val;
+static int last_val;
+
+   noInterrupts();
+   val = digi_peak;
+   digi_peak = 0;
+   interrupts();
+
+   val = 10 * val / 2048;
+   if( val > last_val ) ++last_val;
+   if( val < last_val ) --last_val;
+  // if( val == last_val ) return;      // skip print repeats
+  // last_val = val;
+   LCD.printNumI( last_val, LEFT, 2*8 );
+   if(last_val >= 7 ) LCD.print((char*)"Danger",15,2*8 );
 }
 
       /* run the switch state machine, generic code for multiple switches even though have only one here */
@@ -1118,7 +1139,7 @@ bool pmFlag;
 }
 
 
-//  tone detection based upon counting 25 ns ticks since last zero cross-chipkit version
+//  tone detection based upon counting 20.8 ns ticks since last zero cross 
 //  20.8333333333333 ns ticks with 48meg clock - Teensy LC version
 //  FT8 etc modes tx tone detection
 //  moving all I2C calls to loop using flags
@@ -1127,14 +1148,11 @@ int data;
 static int last;
 static int32_t start_tm;                               // last timer value
 static int32_t total_tm;
-//static int ramp;
+static int skip_1;                                     // skip 1st result when signal starts
 int32_t timer;
 int32_t fraction;                                      // counts past zero cross
 int32_t tm;
 int spread;
-//const float rcos[] = { 0.156, 0.309, 0.454, 0.588, 0.707, 0.809, 0.891, 0.985, 1.0 };
-//static int dir;
-//static int ticks;
 
 // SYST_CVR counts down from 48000 to zero and repeats
 
@@ -1144,150 +1162,36 @@ int spread;
   start_tm = timer;
   if( tm < 0 ) tm += 48000;
   total_tm += tm;
-  
- // ++ticks;
- // ticks &= 15;                    // 16k sample rate
-
    
   data = analogRead( A0 ) - 2048;
-  if( abs(data) > 110 ) digi_vox = 10;
+  int adata = abs( data );
+  if( adata > 110 ) digi_vox = 5;
+  if( adata > digi_peak ) digi_peak = adata;
 
   if( digi_vox == 0 ){
      total_tm = 0;
-     return;
-  }
-
-/*
-  if( digi_vox ){
-     if( transmitting == 0 ) t_control = ON_ , ticks = 2;      //transmit( ON_ );
-     if( ticks == 0 ){
-        --digi_vox;
-        if( digi_vox == 0 ){
-           t_control = OFF_;                       //transmit( OFF_ );
-           tone_available = 0;
-           return;
-        }
-     }
-  }
-  else{
-     total_tm = 0, ramp = 0, dir = 0;
-     return;
-  }
-  */
-
-  if( data > 0 && last <= 0 ){                          // zero cross detected
-      spread = data-last;                               // last is always negative
-      fraction =  ( data * tm ) / spread;               // ticks past zero
-      tone_ = total_tm - fraction;                      // sub ticks past zero cross
-      total_tm = fraction;                              // add fraction past zero as start amount for next cycle
-      tone_available = 1;    
-  }
-  last = data;
-
-/*
-  if( transmitting ){                                   // wave shaping
-     if( digi_vox > 2 && ramp < 9 ){
-        tx_power( rcos[ramp] * bands[band].tx_pwr, 0 );
-        ++ramp;    // up to tx_pwr for this band
-        if( dir != 1 ){
-          //  phase_change = 1;
-            report_ramp = ramp;                         // debug or level setting
-        }
-        dir = 1;
-     }
-     if( digi_vox <= 2  && ramp > 0  ){
-       --ramp;
-       tx_power( rcos[ramp] * bands[band].tx_pwr , 0 );
-       dir = -1;
-     }
-  }
-  */
-  
-}
-
-
-/*
-//  tone detection based upon counting 25 ns ticks since last zero cross-chipkit version
-//  20.8333333333333 ns ticks with 48meg clock - Teensy LC version
-//  FT8 etc modes tx tone detection
-//  moving all I2C calls to loop using flags
-void digi_core( ){
-int data;
-static int last;
-static uint32_t start_tm;                               // last timer value
-static uint32_t total_tm;
-static int ramp;
-uint32_t timer;
-uint32_t fraction;                                      // counts past zero cross
-uint32_t tm;
-int spread;
-const float rcos[] = { 0.156, 0.309, 0.454, 0.588, 0.707, 0.809, 0.891, 0.985, 1.0 };
-static int dir;
-static int ticks;
-
-//Serial.println( SYST_CVR );
-return;
-
-  timer = SYST_CVR;
- // tm = timer - start_tm;
-  tm = start_tm - timer;        // counts down
-  start_tm = timer;
-  total_tm += tm;
-  ++ticks;
-  ticks &= 15;                    // 16k sample rate
-
-   
-  data = analogRead( A0 ) - 2048;
-  if( abs(data) > 110 ) digi_vox = 5;
-
-  if( digi_vox ){
-     if( transmitting == 0 ) t_control = ON_ , ticks = 2;      //transmit( ON_ );
-     if( ticks == 0 ){
-        --digi_vox;
-        if( digi_vox == 0 ){
-           t_control = OFF_;                       //transmit( OFF_ );
-           tone_available = 0;
-           return;
-        }
-     }
-  }
-  else{
-     total_tm = 0, ramp = 0, dir = 0;
+     skip_1 = 1;                                        // seems only the 1st zero cross would be incorrect
      return;
   }
 
   if( data > 0 && last <= 0 ){                          // zero cross detected
       spread = data-last;                               // last is always negative
       fraction =  ( data * tm ) / spread;               // ticks past zero
-      tone_ = total_tm - fraction;                      // sub ticks past zero cross
+      tone_ = ( digi_vox > 2 ) ? total_tm - fraction : 1;   // sub ticks past zero cross, or signal ft8_tx to hold previous tone
       total_tm = fraction;                              // add fraction past zero as start amount for next cycle
-      tone_available = 1;    
+      if( skip_1 ) --skip_1;
+      else tone_available = 1;
+          
   }
   last = data;
-
-  if( transmitting ){                                   // wave shaping
-     if( digi_vox > 2 && ramp < 9 ){
-        tx_power( rcos[ramp] * bands[band].tx_pwr, 0 );
-        ++ramp;    // up to tx_pwr for this band
-        if( dir != 1 ){
-            phase_change = 1;
-            report_ramp = ramp;                         // debug or level setting
-        }
-        dir = 1;
-     }
-     if( digi_vox <= 2  && ramp > 0  ){
-       --ramp;
-       tx_power( rcos[ramp] * bands[band].tx_pwr , 0 );
-       dir = -1;
-     }
-  }
   
 }
-*/
 
 
-uint32_t median( uint32_t val ){
-static uint32_t vals[3];
+
+// changed to use floats after the average over 10ms
+float median( float val ){
+static float vals[3];
 static uint8_t in;
 uint8_t j,i,k;                               // low, median, high
 
@@ -1303,22 +1207,34 @@ uint8_t j,i,k;                               // low, median, high
    return vals[i];
 }
 
-// ft8 tx or any single tone digi mode
+// ft8 tx or any single tone digi mode 
 void ft8_tx( uint32_t val ){
 static uint32_t tm;
 static uint32_t tval;
 static int count;
 float val2;
 
+  if( val == 1 ){                            // hold previous tone
+      tm = millis();
+      tval = 0, count = 0;
+      return;
+  }
 
   if( val < 15600 || val > 240000 ) return;   // < 25ns ticks for 3000 to 200 hz  
 
+//  if( millis() - tm > 20 ){                   // flush tail end of last tx
+//      tm = millis();
+//      tval = 0, count = 0;
+//      return;
+//  }
  // val = median( val );                      // remove glitches in the data stream, introduces noise - perhaps noise comes in pairs
+
   tval += val;
   ++count;
-  
+
+  // average signal for some time...
   // 3ms updates, 333 baud.  10ms updates, 100 baud.  20ms is 50 updates a second.  5ms may be better for ft4.  Has more noise than 10
-  // 10ms has 100hz fm modulation.  5ms would have 200hz modulation.
+  // 10ms has very snall 100hz fm modulation.  5ms would have 200hz modulation.
   if( millis() - tm < 10 ) return;             // 5ms is 1/32 baud overlap of 6 baud, 10ms 1/16 fuzzy area
   tm = millis();
 
@@ -1329,11 +1245,11 @@ float val2;
   val2 =  48000000.0f / val2;                   // 20.8333333333333f ns per count
   count = 0;  tval = 0;
 
- // if( digi_vox <= 2 ) return;    // transmission ending - keep current tone.
-  
-    si_tone_offset( val2 );  // or tone_offset = val2 and loop will send it
+   // val2 = median( val2 );        // needed to remove last of glitches for cw sent with fldigi, else strange bumps in waveform
+    si_tone_offset( val2 );         // or tone_offset = val2 and loop will send it
      
-  // Serial.println(val2);    // !!! debug arduino serial plotter  OOB on WSJT-x if left on
+// Serial.println(val2);    // !!! debug arduino serial plotter  OOB on WSJT-x if left on
+ 
   if( ramp_flag == UP ) ramp( UP ), ramp_flag = 0;
 }
 
