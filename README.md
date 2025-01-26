@@ -7,4 +7,6 @@ Project change to Teensy LC and Si5351 clock module.  The DDS did not do well ab
 
 Adding DIGI single tone transmit and receive as well as standalone WSPR.
 
+Used the AS9850 in a completely different wspr tx with PC16F690 processor.
+
 
