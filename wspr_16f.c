@@ -1,5 +1,22 @@
 
-/* 16F690   wspr tx on solar power */
+/* ********************
+  wspr tx on solar power
+  PIC16F690
+  DDS board
+  QRP LABS arduino shield
+  5 volt NIMH battery
+  Canaduino WWVB receiver
+
+  A high side switch keeps the DDS off to reduce battery drain.  This causes frequency drift as it starts cold.
+  The frequency is counted before and after the wspr transmission to adjust the drift compensation amount.
+  The PIC SPI module is used for clocking the DDS.
+  The PIC UART is used at 10 baud for receiving the time signal.
+  Timer2 is used to produce a 1ms interrupt for timing.
+  The internal voltage reference is read with the A/D converter to calculate the battery voltage.
+  The ground lead of the 7805 has a diode to ground to increase the charging voltage.  A BS170 is across the
+    diode to control charging ( on or off ).  A 4.7 ohm series resistor keeps charge current low.
+
+*********************** */
 
 /*   Wiring
   Processor                  QRP Labs Shield I/O pin or other connection
@@ -9,7 +26,7 @@
 12   RB5  RX                     0     Canaduino wwvb rx signal. Can use shield gps connector. 
 10   RB7  TX                     unused
 
- 4   RA3                        VPP programming
+ 4   RA3                        VPP programming, for reset function wired to shield pin 1
  3   RA4                        xtal osc
  2   RA5                        xtal osc
 19   RA0                        isp data
@@ -51,10 +68,11 @@
 #define VIN_CHECK 8
 #define PRE_TX 16
 
-/* limits for battery: ok to tx, charge on and off, ok was 111 */
-#define BAT_OK 120
+/* limits for battery: ok to tx, charge on and off, think bat ok should be 117 */
+/* numbers are A/D readings of the internal 0.6v reference */
+#define BAT_OK 119
 #define BAT_LOW 109
-#define BAT_HIGH 104
+#define BAT_HIGH 105
 
 /* port C single bit i/o */
 #asm
@@ -76,8 +94,8 @@ BAT_CHARGE equ 4       ; inverse logic
 
 #endasm
 
-#define CAL 16      /* freq a bit low, adj value in about 7.5 hz steps */
-                    /* !!! might be different for 30 vs 20 meters */
+#define CAL 14      /* freq a bit low, adj value in about 7.5 hz steps */
+                    /* might be different for 30 vs 20 meters */
 
 /* eeprom */
 /*extern char EEPROM[2] = {0xff,0xff};     eeprom as one big array */
@@ -95,7 +113,7 @@ extern char wspr_msg[41] = {
 0x2E, 0xD4, 0x8A, 0x4E, 0x72, 0xA, 0x68, 0xB1, 0x85, 0x36, 
 0x8 };
 extern char slots[6] = { 2, 10, 18, 28, 38, 48 };     /* xmit on these minutes, save 50-60 for wwvb rx */
-extern char EE_DRIFT = 18;
+extern char EE_DRIFT = 15;
 
 
 
@@ -137,8 +155,9 @@ char charging;
 char drift;
 char drift_l;
 char drift_h;
+char trans_count;           /* tx's since wwvb match */
 
-/* bank 1 ram - 80 bytes - use may speed code using bank1 registers when writing SFR's */
+/* bank 1 ram - 80 bytes */
 #pragma pic  160
 char pre_tx;
 char post_tx;
@@ -181,7 +200,8 @@ static char pre_tx;
          arg3 = arg2 = arg0 = 0;      /* warm up slightly off freq */
          arg1 = 20;
          dsub();
-         clock_dds( POWER_UP );     /*  */
+         clock_dds( POWER_UP );
+         if( trans_count != 255 ) ++trans_count;   /* tx's since wwvb match */
       }
    }
 
@@ -240,7 +260,7 @@ static char pre_tx;
             tmr0_pre_L += 128;
          }
   /* fudge factor, algorithm seems to bias towards positive drift as reported by wsjt-x */
-         if( tmr0_post_L != 255 ) ++tmr0_post_L;
+         if( tmr0_post_L != 255 ) ++tmr0_post_L; 
 
          if( tmr0_post_L > tmr0_pre_L && drift != 0 ) --drift;
          if( tmr0_post_L < tmr0_pre_L ) ++drift;
@@ -259,7 +279,7 @@ char read_prescaler(){
 static char tmr;
 static char val;
 
-/* !!! scope trigger */
+/* scope trigger */
 /* ***
   #asm
    banksel PORTC
@@ -283,7 +303,7 @@ static char val;
     bsf TRISA, RA2       ; return pin to input, timer runs freely
    #endasm
 
-/* !!! scope trigger */
+/* scope trigger */
 /* ****
   dv = dv;
   #asm
@@ -308,13 +328,13 @@ static char v1, v2;
    if( transmitting ) return;
    if( charging == 0 ){
       vin_ok = 1;
-      v1 = read_vp6();     /* get a base value */
+      v1 = vcc;        /* get a base value */
       return;
    }
 
  /*  charging is on, measure vcc. */
  /* if lower value than previous, then have sunlight */
-   v2 = read_vp6();
+   v2 = vcc;
    if( v2 == v1 ) return;            /* can't tell */
     
    vin_ok = ( v2 < v1 ) ? 1 : 0;     /* inverse - higher battery is lower reading */
@@ -362,7 +382,7 @@ void check_bat(){            /* get a reading of the battery level */
    if( vcc > BAT_LOW ) charging = 1;    /* put in new limits, experimental ones */
    if( vcc < BAT_HIGH ) charging = 0; 
 
-   short_blink( vcc );   /* !!! debug */
+   short_blink( vcc );   /* debug */
 
    if( charging == 1 ){    /* turn charging on and off  */
      #asm
@@ -415,6 +435,15 @@ void check_bat(){            /* get a reading of the battery level */
 
 void led_control( char t ){
 
+   if( vcc > 124 ){       /* keep led's off when battery really low */
+     #asm
+      banksel PORTC
+      bcf PORTC, 0
+      bcf PORTC, 1
+     #endasm
+     return;
+   }
+
    dv = t & 3;
    #asm
      banksel PORTC
@@ -437,6 +466,13 @@ void small_delay( char count ){
 
 }
 
+
+
+/*
+   this wwvb receiver seems different from my previous one.  It does not respond to noise and seems to
+   produce a 0,1 or sync onl which perhaps is not always correct.  Received signal edges seem pre-defined.
+   As such I think there needs to be more sanity checking other than framing errors and 0,1 or sync received.
+*/
 #define SYNC 0x80
 #define ZERO 0xfe
 #define ONE  0xf0
@@ -447,7 +483,8 @@ static char i;
 static char ok;
 static char t;
 static char wmin;
-
+static char errors;       /* receive 60 seconds of valid data before allowing decode on 10 elements */
+static char dist;
 
    #asm
     banksel PIR1
@@ -470,10 +507,26 @@ static char wmin;
    }  
    wwvb_data[10] = dat;
 
+   /* extra sanity checks, look for 1 minute of error free signal */
+
+   if( errors ) --errors;
+
+   /* if no match in 48 hours, loosen the requirements, just match 1st 11 seconds */
+   if( trans_count != 255 ){
+      if( dat != SYNC && dat != ONE && dat != ZERO ) errors = 60;
+
+      /* distance between syncs  1 9 or 10 */
+      ++dist;
+      if( dat == SYNC ){
+         if( dist != 1 && dist != 9 && dist != 10 ) errors = 60;
+         dist = 0;
+      }
+   }
+
    /* match first 11 of wwvb data frame */
    if( wwvb_data[0] == SYNC && wwvb_data[1] == SYNC && wwvb_data[10] == SYNC && wwvb_data[5] == ZERO ){
 
-      ok = 1;
+      ok = (errors) ? 0 : 1;        /* if errors then decode is defeated */
       wmin = 0;
       t = 40;                       /* weights 40,20,10,8,4,2,1 */
       for( i = 2; i < 5; ++i ){
@@ -495,7 +548,8 @@ static char wmin;
            sec = 10;
            min = wmin;
           interrupts();
-          short_bell(); 
+          short_bell();
+          trans_count = 0;
        /* done for this hour, so turn off rx here, and turn off the LED's, and return */  
           #asm
            banksel PORTC
@@ -503,19 +557,21 @@ static char wmin;
           ; bcf PORTC, LED1        ; short_bell cleans up the led's
           ; bcf PORTC, LED0
           #endasm
-          return;  
+          return;
       }
 
    }
 
 /*  LED's */
 
-   if( dat == SYNC ) dv = 3
+   if( dat == SYNC ) dv = 3;
    else if( dat == ONE ) dv = 2; 
    else if( dat == ZERO ) dv = 1;
    else dv = 0;
 
    led_control( dv );
+
+  /* dv = ( dat == SYNC ) ? 3 : (dat == ONE) ? 2 : (dat == ZERO ) ? 1 : 0; */
 
 }
 
@@ -538,10 +594,10 @@ void dds_on(){
    #asm
     banksel PORTC
     bcf  PORTC, BAT_CHARGE     ;  enable low, turn on more power
-    bcf  PORTC, DDS_PWR
+    bcf  PORTC, DDS_PWR        ;  high side switch on
    #endasm
 
-   delay( 20 );
+   delay( 20 );     /* high side switch is slow soft start */
 
 /* init DDS, clock and load to get into serial mode, twice just in case */
 /* RB6 is clock, RC7 is data, ( SDI ) RB4 as the load pulse */
@@ -571,12 +627,12 @@ void dds_on(){
 void dds_off(){
 
    
-   SSPCON = 0;
-   PORTB = 0;
+   SSPCON = 0;          /* spi off */
+   PORTB = 0;           /* clock, fq_up low */
    #asm
     banksel PORTC
-    bcf PORTC, RC7       ; fq_up low
-    bsf PORTC, DDS_PWR
+    bcf PORTC, RC7       ; sdo low
+    bsf PORTC, DDS_PWR   ; high side switch off
    #endasm
 
    if( charging == 0 ){
@@ -650,6 +706,8 @@ static char c;              /* char position */
    zacc();
    arg3 = arg2 = arg1 = 0;
    arg0 = drift;
+  /* try secondary curve with less drift compensation near end of transmission */
+   if( txcount < 60 ) ++arg0;
    acc1 = drift_h;
    acc0 = drift_l;
    dadd();
@@ -986,7 +1044,6 @@ static char mod;
 init(){       /* any page, called once from reset */
 
 /* enable clock at 4 or 8 meg */
-/* !!!!! changed this for debug */
  /*  OSCCON= 0x70; */  /* external crystal or osccon =   0x60 is 4 meg internal clock or 0x70 for 8 meg */
    EECON1 = 0;     /* does the free bit sometime power up as 1 and cause corruption */
 
@@ -1010,7 +1067,7 @@ init(){       /* any page, called once from reset */
 /* init pins */
 
 
-  /* OPTION_REG = 0b11100111; radix binary doesn't work */
+  /* OPTION_REG = 0b11100111; radix binary doesn't work with this compiler !! */
    OPTION_REG = 0xe7;
    #asm
      banksel PORTA
@@ -1021,23 +1078,21 @@ init(){       /* any page, called once from reset */
    ANSELH = 0;
    TRISC = 0x00;          /*  SDO as output,2 unused outputs, dds_pwr, charge, wwvb, led's as outputs */
    PORTC = 0x18;          /*  wwvb off, led's off, dds_pwr off, charge off  */
-  PORTC = 0x1c;        /* !!! turn wwvb rx on for testing */
+ /* PORTC = 0x1c; */       /* turn wwvb rx on for testing */
   
-  /* PORTB = 0xff - 0x10; */
    PORTB = 0;
-  /* TRISB = 0b10101111;  */  /* for rb6 as spi clk, and will RB4 work as an output in spi mode? */
-   TRISB = 0xaf;
+   TRISB = 0xaf;      /* 0b10101111, rb6 as spi clk, RB4 works as an output in spi mode */
 
 /* set up timer2 for a millis interrupt */
    PR2 = 124;           /* 2000000 / 16 / 125 = 1000.  one less count needed ?  124 or 125 */
    T2CON = 6;           /* on and 16:1 prescale */
    PIE1 = 2;            /* enable timer2 interrupts */
    INTCON = 0xc0;
-                        /* interrupt function to clear TMR2IF in PIR1 *
+                        /* interrupt function to clear TMR2IF in PIR1 */
 
 /* set up uart for 10 baud recieve - wwvb */
    TXSTA = 0x0;           /* will tx pin be available for i/o if tx not enabled ?, or 0x20 */
-   BAUDCTL = 0x08;      /* brg16 */
+   BAUDCTL = 0x08;        /* brg16 */
    SPBRGH = 0xc3;
    SPBRG = 0x4d;        /* c350 -1 calc value :  or a little lower if framing errors alot */
                         /* this works extremely well for how simple it is */  
@@ -1087,6 +1142,7 @@ void long_blink( char val ){
       delay( 255 );
       delay( 128 );
       val -= 100;
+      if( PIR1 & 0x20 ) return;        /* wwvb data available */
    }
     
    led_control( 0 ); 
@@ -1099,6 +1155,7 @@ void long_blink( char val ){
       delay( 255 );
       delay( 128 );
       val -= 10;
+      if( PIR1 & 0x20 ) return;        /* wwvb data available */
    }
 
    led_control(0); 
@@ -1111,6 +1168,7 @@ void long_blink( char val ){
       delay( 255 );
       delay( 128 );
       val -= 1;
+      if( PIR1 & 0x20 ) return;        /* wwvb data available */
    }
   led_control( 0 );
   long_big_delay( 8 ); 
@@ -1121,7 +1179,10 @@ void long_blink( char val ){
 /* big_delay - delay in 1/4 sec chunks - page1 so called long */
 void long_big_delay(char sec4 ){
 
-  while( sec4-- ) delay( 255 );
+  while( sec4-- ){
+    if( PIR1 & 0x20 ) break;        /* wwvb data available */
+    delay( 255 );
+  }
 
 }
 
