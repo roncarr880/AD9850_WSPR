@@ -9,4 +9,6 @@ Adding DIGI single tone transmit and receive as well as standalone WSPR.
 
 Used the AS9850 in a completely different wspr tx with PC16F690 processor.
 
+And made a Si5351 version with Pic16F690 as the DDS seems to have issues with heat.
+
 
