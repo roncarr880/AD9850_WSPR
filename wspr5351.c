@@ -112,7 +112,7 @@ DDS_PWR equ 3          ; inverse logic and high side switch is now dds power con
 
 #endasm
 
-#define CAL 14      /* freq a bit low,  */
+#define CAL 3       /* freq a bit low,  */
                     /* might be different for 30 vs 20 meters */
 
 /* eeprom */
@@ -120,7 +120,7 @@ DDS_PWR equ 3          ; inverse logic and high side switch is now dds power con
 /*   dds load value per 1 hz for 125mhz xtal = 34.359738368 */
 /*  20 meters solution , and each 1.4648 step adds 50 ( 50.33 ) */
 
-extern char base20[8] = { 0x68, 0x2E, 0x00, 0x0C, 0x18, 0x00, 0x3B, 0x42 };
+extern char base20[8] = { 0x68, 0x2E, 0x00, 0x0C, 0x18, 0x00, 0x37, 0x42 };       /* 37,42 : 3B 42 */
 
 /* wspr msg packed, last byte has just 2 entries, rest 4, message starts with LSBits */
 /* extern char wspr_msg[41] = {
@@ -139,7 +139,7 @@ extern char wspr_msg[162] = {
       3, 2, 1, 1, 0, 2, 2, 1, 3, 0, 0, 2
    };
 extern char slots[6] = { 2, 10, 18, 28, 38, 48 };     /* xmit on these minutes, save 50-60 for wwvb rx */
-extern char EE_DRIFT = 2;
+extern char EE_DRIFT = 1;
 
 
 /* access ram  - 16 locations, use wisely */
@@ -315,17 +315,18 @@ static char pre_pre;
          /* long term drift compensation, frequency seems to measure about 700 hz low for some reason */
          /* is the 8 mhz xtal a bit fast ? */
          if( save_cal == 0x17 ){      /* expected 0x1a */
-            if( save_cal_L < 130 && calibrate != 255 ) calibrate += 1;
-            if( save_cal_L > 140 && calibrate > 1 ) calibrate -= 1;
+            if( save_cal_L < 128 && calibrate < 20 ) calibrate += 1;
+            if( save_cal_L > 162 && calibrate > 1 ) calibrate -= 1;
          }
-       /*******
-         short_blink( save_cal );
-         if( save_cal == 0x17 ){
+      
+       /*  short_blink( save_cal ); */
+       /*  if( save_cal == 0x17 ){
             short_bell();
             delay( 255 );
+            delay( 255 );
             short_blink( save_cal_L );
-         }
-      **********/        
+         } */
+              
       }
 
    }
@@ -628,7 +629,8 @@ static char c;              /* char position */
         arg1 = drift_h;                /* add drift compensation */
         arg0 = drift_l;
         #asm
-         ASRD arg1,arg0        ; shift out 2 fractional bits
+         ASRD arg1,arg0        ; shift out 3 ( was 2 ) fractional bits
+         ASRD arg1,arg0
          ASRD arg1,arg0
         #endasm
         dadd();
@@ -658,7 +660,8 @@ static char c;              /* char position */
    arg1 = drift_h;                 /* drift compensation */
    arg0 = drift_l;
    #asm
-    ASRD arg1,arg0        ; shift out 2 fractional bits
+    ASRD arg1,arg0        ; shift out 3 fractional bits
+    ASRD arg1,arg0
     ASRD arg1,arg0
    #endasm
    dadd();
@@ -933,7 +936,7 @@ void si5351_init(){
    si_adr = 43+16;
    si_write( 1 );
    si_adr = 16;
-   si_write( 0x6c );    /* clock 0 assigned to pllb with 2ma drive,  c d e f == 2 4 6 8 ma drive */
+   si_write( 0x6d );    /* clock 0 assigned to pllb with x ma drive,  c d e f == 2 4 6 8 ma drive */
  /****  ++si_adr;
    si_write( 0x4c );    /* clock 1 assigned to plla with 2ma drive 
    ++si_adr;
